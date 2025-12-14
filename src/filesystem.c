@@ -6,7 +6,7 @@
 /* --- Bitmap Helpers --- */
 
 static void set_bit(unsigned char *bitmap, int pos) { bitmap[pos/8] |= (1 << (pos%8)); }
-static void clear_bit(unsigned char *bitmap, int pos) { bitmap[pos/8] &= ~(1 << (pos%8)); }
+// static void clear_bit(unsigned char *bitmap, int pos) { bitmap[pos/8] &= ~(1 << (pos%8)); }
 static int test_bit(unsigned char *bitmap, int pos) { return (bitmap[pos/8] & (1 << (pos%8))) != 0; }
 
 static int find_free_bit(unsigned char *bitmap, int max) {
