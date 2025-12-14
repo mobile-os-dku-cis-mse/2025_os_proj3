@@ -1,7 +1,7 @@
-# SimpleFS - Filesystem Implementation Details
+# OS_PROJ_3 - Filesystem Implementation Details
 
 ## Overview
-**SimpleFS** is a custom, lightweight, userspace file system implementation designed to simulate low-level disk management. It operates on a single binary file (disk image) which acts as the physical storage device.
+This **project** is a custom, lightweight, userspace file system implementation designed to simulate low-level disk management. It operates on a single binary file (disk image) which acts as the physical storage device.
 
 This document details the internal architecture, data structures, and memory management strategies used in `filesystem.c` and `filesystem.h`.
 
