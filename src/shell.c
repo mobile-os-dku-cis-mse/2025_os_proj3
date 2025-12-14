@@ -199,6 +199,6 @@ int main() {
     }
 
     fs_destroy(ctx);
-    printf("Bye.\n");
+    printf("Bye :)\n");
     return 0;
 }
