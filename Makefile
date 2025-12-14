@@ -6,7 +6,7 @@
 
 CC 			= 	gcc
 
-NAME		=	os_proj3
+NAME		=	shell_os_proj3
 
 SRC			:= 	filesystem.c    \
 				shell.c

@@ -10,7 +10,7 @@ To build the shell, you must compile the shell source code alongside the filesys
 
 Run the following command in your terminal:
 ```bash
-gcc shell.c filesystem.c -o shell
+make
 ```
 
 ## Getting Started
@@ -18,14 +18,9 @@ gcc shell.c filesystem.c -o shell
 ### 1. Launching the Shell
 You can launch the shell with or without a target disk image.
 
-**Option A: Load an existing disk**
+**Start empty (and format later)**
 ```bash
-./shell my_disk.img
-```
-
-**Option B: Start empty (and format later)**
-```bash
-./shell
+./shell_os_proj3
 ```
 
 ### 2. The Command Prompt
@@ -63,7 +58,7 @@ You can launch the shell with or without a target disk image.
 Here is a typical session to create a disk and add files:
 
 ```text
-$ ./shell
+$ ./shell_os_proj3
 FS[No Disk]> format data.img
 Disk formatted and created: data.img
 
