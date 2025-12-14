@@ -8,7 +8,8 @@ CC 			= 	gcc
 
 NAME		=	os_proj3
 
-SRC			:= 	filesystem.c
+SRC			:= 	filesystem.c    \
+				shell.c
 
 VPATH		:=	src/
 

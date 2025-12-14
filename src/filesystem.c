@@ -2,88 +2,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
-
-/* --- Definitions & Structures --- */
-
-#define SIMPLE_PARTITION      0x1111
-#define INVALID_INODE         0
-#define BLOCK_SIZE            1024
-
-// Permissions & Modes
-#define INODE_MODE_AC_ALL     0x777
-#define INODE_MODE_REG_FILE   0x10000
-#define INODE_MODE_DIR_FILE   0x20000
-
-// Directory Entry Types
-#define DENTRY_TYPE_REG_FILE  0x1
-#define DENTRY_TYPE_DIR_FILE  0x2
-
-// Error Codes
-#define FS_SUCCESS     0
-#define FS_ERROR      -1
-#define FS_ENOENT     -2
-#define FS_EEXIST     -3
-#define FS_ENOSPC     -4
-#define FS_EINVAL     -5
-#define FS_EISDIR     -6
-#define FS_ENOTDIR    -7
-
-/* --- Disk Structures --- */
-
-struct super_block {
-    unsigned int partition_type;
-    unsigned int block_size;
-    unsigned int inode_size;
-    unsigned int first_inode;
-    unsigned int num_inodes;
-    unsigned int num_inode_blocks;
-    unsigned int num_free_inodes;
-    unsigned int num_blocks;
-    unsigned int num_free_blocks;
-    unsigned int first_data_block;
-    char volume_name[24];
-    unsigned char padding[960];
-};
-
-struct inode {
-    unsigned int mode;
-    unsigned int locked;
-    unsigned int date;
-    unsigned int size;
-    int indirect_block;
-    unsigned short blocks[0x6];
-};
-
-struct blocks {
-    unsigned char d[BLOCK_SIZE];
-};
-
-struct partition {
-    struct super_block s;
-    struct inode inode_table[224];
-    struct blocks data_blocks[4088];
-};
-
-struct dentry {
-    unsigned int inode;
-    unsigned int dir_length;
-    unsigned int name_len;
-    unsigned int file_type;
-    union {
-        unsigned char name[256];
-        unsigned char n_pad[16][16];
-    };
-};
-
-/* --- Runtime Context --- */
-
-typedef struct {
-    struct partition *part;
-    unsigned char *inode_bitmap;
-    unsigned char *block_bitmap;
-    int root_inode;
-} fs_context;
-
+#include "filesystem.h"
 /* --- Bitmap Helpers --- */
 
 static void set_bit(unsigned char *bitmap, int pos) { bitmap[pos/8] |= (1 << (pos%8)); }
@@ -279,29 +198,56 @@ static int find_root_inode(fs_context *ctx) {
 }
 
 static int resolve_path(fs_context *ctx, const char *path) {
+    if (!path) return FS_EINVAL;
     if (strcmp(path, "/") == 0) return ctx->root_inode;
     
+    // Si le chemin ne commence pas par '/', on le rajoute virtuellement
+    char *temp_path = NULL;
+    if (path[0] != '/') {
+        temp_path = malloc(strlen(path) + 2);
+        sprintf(temp_path, "/%s", path);
+        path = temp_path;
+    }
+
     int curr = ctx->root_inode;
     char *dup = strdup(path);
     char *tok = strtok(dup, "/");
     
     while (tok) {
         int next = lookup_in_dir(ctx, curr, tok);
-        if (next < 0) { free(dup); return next; }
+        if (next < 0) { 
+            free(dup); 
+            if (temp_path) free(temp_path);
+            return next; 
+        }
         curr = next;
         tok = strtok(NULL, "/");
     }
     free(dup);
+    if (temp_path) free(temp_path);
     return curr;
 }
 
 static int split_path(const char *path, char **parent, char **name) {
-    if (!path || !parent || !name || strcmp(path, "/") == 0) return -1;
+    if (!path || !parent || !name) return -1;
+    if (strcmp(path, "/") == 0) return -1;
+    
     const char *slash = strrchr(path, '/');
-    if (!slash) return -1;
-    if (slash == path) *parent = strdup("/");
-    else *parent = strndup(path, slash - path);
-    *name = strdup(slash + 1);
+    
+    if (!slash) {
+        // Cas: "fichier.txt" (pas de slash) -> on suppose à la racine "/"
+        *parent = strdup("/");
+        *name = strdup(path);
+    } else if (slash == path) {
+        // Cas: "/fichier.txt" -> parent "/"
+        *parent = strdup("/");
+        *name = strdup(slash + 1);
+    } else {
+        // Cas: "/dossier/fichier.txt"
+        *parent = strndup(path, slash - path);
+        *name = strdup(slash + 1);
+    }
+    
     return 0;
 }
 
@@ -391,8 +337,9 @@ int fs_mount(fs_context *ctx, const char *path) {
 }
 
 int fs_create(fs_context *ctx, const char *path, int type) {
-    char *parent_path, *filename;
+    char *parent_path = NULL, *filename = NULL;
     if (split_path(path, &parent_path, &filename) != 0) return FS_EINVAL;
+    
     int p_inum = resolve_path(ctx, parent_path);
     free(parent_path);
     
@@ -428,8 +375,11 @@ int fs_create(fs_context *ctx, const char *path, int type) {
     
     int res = add_dentry(ctx, p_inum, filename, new_inum, 
         (type == INODE_MODE_DIR_FILE) ? DENTRY_TYPE_DIR_FILE : DENTRY_TYPE_REG_FILE);
+    
     free(filename);
-    return res;
+    
+    // CORRECTION CRITIQUE : Si add_dentry retourne > 0 (octets écrits), on retourne SUCCES (0)
+    return (res > 0) ? FS_SUCCESS : res;
 }
 
 int fs_write(fs_context *ctx, const char *path, const void *buf, unsigned int size, unsigned int offset) {
@@ -485,66 +435,66 @@ void print_entry(const char *name, int type, unsigned int size) {
     printf("  %-15s %s (%u octets)\n", name, is_dir ? "[DIR]" : "[FILE]", size);
 }
 
-int main(int argc, char **argv) {
-    if (argc < 2) {
-        printf("Usage: %s <disk_image>\n", argv[0]);
-        return 1;
-    }
+// int main(int argc, char **argv) {
+//     if (argc < 2) {
+//         printf("Usage: %s <disk_image>\n", argv[0]);
+//         return 1;
+//     }
 
-    char *disk_name = argv[1];
-    printf("=== Filesystem Tool ===\n");
-    printf("Target Image: %s\n\n", disk_name);
+//     char *disk_name = argv[1];
+//     printf("=== Filesystem Tool ===\n");
+//     printf("Target Image: %s\n\n", disk_name);
 
-    fs_context *ctx = fs_init();
-    if (!ctx) {
-        printf("Memory Error.\n");
-        return 1;
-    }
+//     fs_context *ctx = fs_init();
+//     if (!ctx) {
+//         printf("Memory Error.\n");
+//         return 1;
+//     }
 
-    // 1. Try to Mount existing disk
-    if (fs_mount(ctx, disk_name) == FS_SUCCESS) {
-        printf("[INFO] Mounted successfully.\n");
-        printf("Volume: %s\n", ctx->part->s.volume_name);
-        printf("Root Inode: %d\n\n", ctx->root_inode);
+//     // 1. Try to Mount existing disk
+//     if (fs_mount(ctx, disk_name) == FS_SUCCESS) {
+//         printf("[INFO] Mounted successfully.\n");
+//         printf("Volume: %s\n", ctx->part->s.volume_name);
+//         printf("Root Inode: %d\n\n", ctx->root_inode);
         
-        printf("--- Content of / ---\n");
-        fs_list(ctx, "/", print_entry);
+//         printf("--- Content of / ---\n");
+//         fs_list(ctx, "/", print_entry);
         
-        // Attempt to read a sample file if it exists
-        char buf[64] = {0};
-        if (fs_read(ctx, "/documents/secret.txt", buf, 63, 0) > 0) {
-            printf("\n[READ TEST] Content of /documents/secret.txt:\n -> \"%s\"\n", buf);
-        }
+//         // Attempt to read a sample file if it exists
+//         char buf[64] = {0};
+//         if (fs_read(ctx, "/documents/secret.txt", buf, 63, 0) > 0) {
+//             printf("\n[READ TEST] Content of /documents/secret.txt:\n -> \"%s\"\n", buf);
+//         }
 
-    } else {
-        // 2. If mount fails, create new disk
-        printf("[WARN] Could not mount %s (File missing or invalid).\n", disk_name);
-        printf("[INFO] Creating and Formatting new disk...\n");
+//     } else {
+//         // 2. If mount fails, create new disk
+//         printf("[WARN] Could not mount %s (File missing or invalid).\n", disk_name);
+//         printf("[INFO] Creating and Formatting new disk...\n");
 
-        if (fs_format(ctx, "MyNewDisk") != FS_SUCCESS) {
-            printf("[ERROR] Failed to format.\n");
-            fs_destroy(ctx);
-            return 1;
-        }
+//         if (fs_format(ctx, "MyNewDisk") != FS_SUCCESS) {
+//             printf("[ERROR] Failed to format.\n");
+//             fs_destroy(ctx);
+//             return 1;
+//         }
 
-        printf("[INFO] Generating sample data...\n");
-        fs_create(ctx, "/documents", INODE_MODE_DIR_FILE);
-        fs_create(ctx, "/documents/secret.txt", INODE_MODE_REG_FILE);
+//         printf("[INFO] Generating sample data...\n");
+//         fs_create(ctx, "/documents", INODE_MODE_DIR_FILE);
+//         fs_create(ctx, "/documents/secret.txt", INODE_MODE_REG_FILE);
         
-        char *txt = "Hello World! This is a test file.";
-        fs_write(ctx, "/documents/secret.txt", txt, strlen(txt), 0);
+//         char *txt = "Hello World! This is a test file.";
+//         fs_write(ctx, "/documents/secret.txt", txt, strlen(txt), 0);
         
-        fs_create(ctx, "/images", INODE_MODE_DIR_FILE);
+//         fs_create(ctx, "/images", INODE_MODE_DIR_FILE);
 
-        if (fs_save(ctx, disk_name) == FS_SUCCESS) {
-            printf("[SUCCESS] New disk saved to %s.\n", disk_name);
-            printf("Run the command again to read the disk.\n");
-        } else {
-            printf("[ERROR] Failed to save disk file.\n");
-        }
-    }
+//         if (fs_save(ctx, disk_name) == FS_SUCCESS) {
+//             printf("[SUCCESS] New disk saved to %s.\n", disk_name);
+//             printf("Run the command again to read the disk.\n");
+//         } else {
+//             printf("[ERROR] Failed to save disk file.\n");
+//         }
+//     }
 
-    fs_destroy(ctx);
-    printf("\n=== Done ===\n");
-    return 0;
-}
+//     fs_destroy(ctx);
+//     printf("\n=== Done ===\n");
+//     return 0;
+// }
