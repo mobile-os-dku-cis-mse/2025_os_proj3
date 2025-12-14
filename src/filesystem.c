@@ -459,8 +459,19 @@ int fs_list(fs_context *ctx, const char *path, void (*cb)(const char*, int, unsi
 /* --- MAIN --- */
 
 void print_ls(const char *name, int type, unsigned int size) {
-    printf("  %-15s %s (%u octets)\n", name, (type == 2) ? "<DIR>" : "<FIC>", size);
+    int is_dir = 0;
+
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+        is_dir = 1;
+    else if (type == DENTRY_TYPE_DIR_FILE)
+        is_dir = 1;
+
+    printf("  %-15s %s (%u octets)\n",
+           name,
+           is_dir ? "<DIR>" : "<FILE>",
+           size);
 }
+
 
 int main(void) {
     printf("=== GENERATEUR DE DISQUE (disk2.img) ===\n\n");
