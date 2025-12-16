@@ -9,9 +9,6 @@
 #include <stdint.h>
 #include "fs.h"
 
-
-
-
 struct partition *part = NULL;
 
 unsigned char inode_mapping[224];
@@ -246,7 +243,9 @@ static int dircache_build_for_dir(struct partition *p, int dir_inum) {
         int r = inode_data(p, dir_inum, &d, sizeof(struct dentry), offset, 0);
         if (r < (int)sizeof(struct dentry)) break;
         if (d.dir_length == 0) break;
-        if (d.inode != 0 && d.name && d.name[0] != '\0') {
+        if (d.inode != 0 && d.name[0] != '\0') {
+            /* ensure null-termination using name_len if available */
+            if (d.name_len < sizeof(d.name)) d.name[d.name_len] = '\0';
             if (dircache_insert(dir_inum, (char*)d.name, d.inode) == 0) inserted++;
         }
         offset += d.dir_length;
@@ -315,7 +314,7 @@ static int get_block_index(struct partition *p, unsigned char *block_mapping, st
 
 /* === 6. inode data read/write === */
 
-// read or write data from an inode (write not implemented yet)
+// read or write data from an inode (write supported)
 static int inode_data(struct partition *p, int inum, void *buf, unsigned int size, unsigned int offset, int write) {
     struct inode *node = load_inode(p, inum);
     if(!node) return -1;
@@ -382,6 +381,9 @@ int find_entry_in_dir(struct partition *p, int dir_inum, const char *name) {
         if (r < (int)sizeof(struct dentry)) break;
         if (d.dir_length == 0) break;
 
+        /* ensure null termination */
+        if (d.name_len < sizeof(d.name)) d.name[d.name_len] = '\0';
+
         if (d.inode != 0) {
             if (strcmp((char*)d.name, name) == 0) {
                 /* insert into cache for future */
@@ -419,30 +421,23 @@ int mount_root(struct partition *part, unsigned char inode_mapping[], unsigned c
         perror("Start Error: Cannot open disk.img");
         return -1;
     }
-
     if (!part) {
         fclose(f);
         fprintf(stderr, "mount_root: partition pointer is NULL\n");
         return -1;
     }
-
     size_t nr = fread(part,1,sizeof(struct partition),f);
     fclose(f);
     if (nr != sizeof(struct partition)) {
         fprintf(stderr, "Warning: fread read %zu bytes (expected %zu)\n", nr, sizeof(struct partition));
     }
-
     if (part->s.partition_type != SIMPLE_PARTITION) {
         printf("Mount Error: Invalid partition type 0x%x\n", part->s.partition_type);
         return -1;
     }
     printf("Kernel: Mount Successful. Volume: %s\n", part->s.volume_name);
-
     rebuild_bitmaps(part, inode_mapping, block_mapping);
-
-    /* build directory caches for faster lookups */
     dircache_build_all_dirs(part);
-
     if (root_idx) {
         *root_idx = find_root_inode(part);
         if (*root_idx == -1) {
@@ -473,7 +468,56 @@ void format_mode(unsigned int mode, char *mode_str) {
     if (mode & INODE_MODE_AC_OTHER_W) mode_str[8] = 'w';
     if (mode & INODE_MODE_AC_OTHER_X) mode_str[9] = 'x';
 }
- // print directory entries in root directory
+
+/* === 11. Path resolution (resolve_path) === */
+// resolve absolute path to inode number, return parent and leaf inode numbers
+int resolve_path(struct partition *part, const char *path, int *parent_out, int *leaf_out) {
+    if (!part || !path || path[0] == '\0') return -1;
+    char tmp[strlen(path) + 1];
+    strcpy(tmp, path);
+
+    int cur = root_inode;
+    char *saveptr = NULL;
+    char *tok = NULL;
+
+    char *p = tmp;
+    if (p[0] == '/') {
+        while (*p == '/') p++;
+    }
+
+    tok = strtok_r(p, "/", &saveptr);
+    int prev = -1;
+    while (tok) {
+        if (strcmp(tok, ".") == 0) {
+            // nothing (current directory)
+        } else if (strcmp(tok, "..") == 0) {
+            int parent = find_entry_in_dir(part, cur, "..");
+            if (parent <= 0) cur = root_inode; // go to root if no parent
+            else cur = parent; // go to parent
+        } else {
+            int child = find_entry_in_dir(part, cur, tok);
+            if (child <= 0) {
+                if (strtok_r(NULL, "/", &saveptr) != NULL) {
+                    return -1;
+                } else {
+                    if (parent_out) *parent_out = cur;
+                    if (leaf_out) *leaf_out = 0;
+                    return 0;
+                }
+            }
+            prev = cur;
+            cur = child;
+        }
+        tok = strtok_r(NULL, "/", &saveptr);
+    }
+
+    if (parent_out) *parent_out = prev >= 0 ? prev : root_inode;
+    if (leaf_out) *leaf_out = cur;
+    return 1;
+}
+
+
+// print directory entries in root directory
 void ls_root(struct partition *p) {
     int root_idx = find_root_inode(p);
     if (root_idx < 0) {
@@ -499,7 +543,7 @@ void ls_root(struct partition *p) {
 
         if (phys_block <= 0 || phys_block >= (int)p->s.num_blocks) continue;
 
-        char *block_ptr = p->data_blocks[phys_block].d;
+        char *block_ptr = (char*)p->data_blocks[phys_block].d;
         int offset = 0;
 
         while (offset < BLOCK_SIZE) {
@@ -519,6 +563,9 @@ void ls_root(struct partition *p) {
             if (tm_info) strftime(date_str, sizeof(date_str), "%b %d %H:%M", tm_info);
             else strcpy(date_str, "Unknown");
 
+            /* ensure name null-terminated */
+            if (d->name_len < sizeof(d->name)) d->name[d->name_len] = '\0';
+
             printf("%s %2d root root %6d %s %s\n",
                    mode_str,
                    (f->mode & INODE_MODE_DIR_FILE) ? 2 : 1,
@@ -529,53 +576,200 @@ void ls_root(struct partition *p) {
     }
 }
 
-/* === 11. Path resolution (resolve_path) === */
-// resolve absolute path to inode number, return parent and leaf inode numbers
-int resolve_path(struct partition *part, const char *path, int *parent_out, int *leaf_out) {
-    if (!part || !path || path[0] == '\0') return -1;
-    char tmp[strlen(path) + 1];
-    strcpy(tmp, path);
+/* === New helpers: on-disk dentry creation, inode creation, persist === */
 
-    int cur = root_inode;
-    char *saveptr = NULL;
-    char *tok = NULL;
+/*
+  Use the struct dentry defined in fs.h:
+    unsigned int inode;
+    unsigned int dir_length;
+    unsigned int name_len;
+    unsigned int file_type;
+    union { unsigned char name[256]; ... };
 
-    char *p = tmp;
-    if (p[0] == '/') {
-        while (*p == '/') p++;
+  For simplicity we write the full sizeof(struct dentry) per entry.
+*/
+// write a dentry into a parent directory at the end (append)
+static int write_dentry_append(struct partition *p, int parent_inum, const char *name, int child_inum) {
+    if (!p || !name) return -1;
+    if (parent_inum < 0 || parent_inum >= (int)p->s.num_inodes) return -1;
+
+    struct inode *parent = &p->inode_table[parent_inum];
+    if (!(parent->mode & INODE_MODE_DIR_FILE)) return -1;
+
+    if (strlen(name) >= sizeof(((struct dentry*)0)->name)) return -1;
+
+    struct dentry de;
+    memset(&de, 0, sizeof(de));
+    de.inode = (unsigned int)child_inum;
+    de.dir_length = (unsigned int)sizeof(struct dentry);
+    de.name_len = (unsigned int)strlen(name);
+    /* set file_type based on child's inode mode if available, else assume reg */
+    if (child_inum > 0 && child_inum < (int)p->s.num_inodes &&
+        (p->inode_table[child_inum].mode & INODE_MODE_DIR_FILE)) {
+        de.file_type = DENTRY_TYPE_DIR_FILE;
+    } else {
+        de.file_type = DENTRY_TYPE_REG_FILE;
     }
+    memcpy(de.name, name, de.name_len);
+    de.name[de.name_len] = '\0';
 
-    tok = strtok_r(p, "/", &saveptr);
-    int prev = -1;
-    while (tok) {
-        if (strcmp(tok, ".") == 0) {
-            /* nothing */
-        } else if (strcmp(tok, "..") == 0) {
-            int parent = find_entry_in_dir(part, cur, "..");
-            if (parent <= 0) cur = root_inode;
-            else cur = parent;
-        } else {
-            int child = find_entry_in_dir(part, cur, tok);
-            if (child <= 0) {
-                /* not found */
-                if (strtok_r(NULL, "/", &saveptr) != NULL) {
-                    /* missing interior dir */
-                    return -1;
-                } else {
-                    if (parent_out) *parent_out = cur;
-                    if (leaf_out) *leaf_out = 0;
-                    return 0;
-                }
-            }
-            prev = cur;
-            cur = child;
+    /* append to parent directory data */
+    unsigned int offset = parent->size;
+    int w = inode_data(p, parent_inum, &de, (unsigned int)sizeof(struct dentry), offset, 1);
+    if (w != (int)sizeof(struct dentry)) return -1;
+
+    parent->date = (unsigned int)time(NULL);
+
+    /* update dircache */
+    dircache_invalidate_dir(parent_inum);
+    dircache_insert(parent_inum, name, child_inum);
+
+    return 0;
+}
+
+// create an inode with given mode, if its a directory, create '.' and '..' entries and allocate a block
+static int create_inode_with_mode(struct partition *p, unsigned char *inode_map, unsigned char *block_map, int mode, int parent_inum) {
+    if (!p) return -1;
+    int inum = alloc_inode(p, inode_map);
+    if (inum < 0) return -1;
+
+    struct inode *n = &p->inode_table[inum];
+    n->mode = (unsigned int)mode;
+    n->date = (unsigned int)time(NULL);
+    n->size = 0;
+    n->indirect_block = -1;
+    for (int i = 0; i < 6; ++i) n->blocks[i] = 0;
+
+    if (mode & INODE_MODE_DIR_FILE) {
+        //if directory, allocate a block for entries
+        int b = alloc_block(p, block_map);
+        if (b < 0) {
+            return -1;
         }
-        tok = strtok_r(NULL, "/", &saveptr);
+        n->blocks[0] = b;
+        n->size = 0;
+
+        // create '.' entry
+        if (write_dentry_append(p, inum, ".", inum) != 0) return -1;
+
+        // '..' points to parent or itself if in root
+        int parent = (parent_inum >= 0) ? parent_inum : inum;
+        if (write_dentry_append(p, inum, "..", parent) != 0) return -1;
+    }
+    return inum;
+}
+
+/* write data into a file (simple writer that writes at offset 0, overwriting) */
+static int fs_write_file_content(struct partition *p, const char *path, const void *data, unsigned int size) {
+    if (!p || !path || !data) return -1;
+    int parent = 0, leaf = 0;
+    int res = resolve_path(p, path, &parent, &leaf);
+    if (res != 1) return -1; /* must exist */
+    int inum = leaf;
+    struct inode *n = &p->inode_table[inum];
+
+    /* truncate existing file and write new content at offset 0 */
+    n->size = 0;
+    int written = inode_data(p, inum, (void*)data, size, 0, 1);
+    if (written != (int)size) return -1;
+    n->date = (unsigned int)time(NULL);
+    return written;
+}
+
+// persist partition structure back to disk image
+static int persist_partition(struct partition *p) {
+    if (!p) return -1;
+    FILE *f = fopen("../disk.img", "r+b");
+    if (!f) {
+        perror("persist_partition: open disk.img for write failed");
+        return -1;
+    }
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return -1;
+    }
+    size_t nw = fwrite(p, 1, sizeof(struct partition), f);
+    fflush(f);
+    fclose(f);
+    if (nw != sizeof(struct partition)) {
+        fprintf(stderr, "persist_partition: wrote %zu bytes (expected %zu)\n", nw, sizeof(struct partition));
+        return -1;
+    }
+    return 0;
+}
+
+/* === 7b. Public create/mkdir API === */
+
+/* create a regular file at pathname (absolute or relative to root)
+   returns 0 on success, -1 on failure */
+int fs_touch(const char *pathname, const char *initial_content) {
+    if (!pathname || !part) return -1;
+
+    int parent = 0, leaf = 0;
+    int res = resolve_path(part, pathname, &parent, &leaf);
+    if (res < 0) return -1;
+    if (res == 1) {
+        // file already exists
+        return -1;
+    }
+    /* res == 0 -> leaf not found; parent set */
+    /* extract leaf name */
+    const char *pname = strrchr(pathname, '/');
+    const char *name = (pname && pname[1] != '\0') ? pname + 1 : pathname;
+    if (!name || name[0] == '\0') return -1;
+    if (strlen(name) >= sizeof(((struct dentry*)0)->name)) return -1;
+
+    /* allocate inode for regular file (no initial data blocks) */
+    int inum = create_inode_with_mode(part, inode_mapping, block_mapping,
+                                     INODE_MODE_REG_FILE | INODE_MODE_AC_USER_R | INODE_MODE_AC_USER_W,
+                                     parent);
+    if (inum < 0) return -1;
+
+    /* add dentry to parent */
+    if (write_dentry_append(part, parent, name, inum) != 0) return -1;
+
+    /* if initial content provided, write it */
+    if (initial_content && initial_content[0] != '\0') {
+        if (fs_write_file_content(part, pathname, initial_content, (unsigned int)strlen(initial_content)) < 0) {
+            return -1;
+        }
     }
 
-    if (parent_out) *parent_out = prev >= 0 ? prev : root_inode;
-    if (leaf_out) *leaf_out = cur;
-    return 1;
+    /* update dircache for parent */
+    dircache_insert(parent, name, inum);
+
+    /* persist */
+    persist_partition(part);
+    return 0;
+}
+
+/* create a directory at pathname; returns 0 on success */
+int fs_mkdir(const char *pathname) {
+    if (!pathname || !part) return -1;
+
+    int parent = 0, leaf = 0;
+    int res = resolve_path(part, pathname, &parent, &leaf);
+    if (res < 0) return -1;
+    if (res == 1) {
+        // directory already exists
+        return -1;
+    }
+
+    // res == 0 -> leaf not found; parent set
+    const char *pname = strrchr(pathname, '/');
+    const char *name = (pname && pname[1] != '\0') ? pname + 1 : pathname;
+    if (!name || name[0] == '\0') return -1;
+    if (strlen(name) >= sizeof(((struct dentry*)0)->name)) return -1;
+
+    // create inode for directory
+    int inum = create_inode_with_mode(part, inode_mapping, block_mapping,
+                                      INODE_MODE_DIR_FILE | INODE_MODE_AC_USER_R | INODE_MODE_AC_USER_W | INODE_MODE_AC_USER_X,
+                                      parent);
+    if (inum < 0) return -1;
+    if (write_dentry_append(part, parent, name, inum) != 0) return -1;
+    dircache_insert(parent, name, inum);
+    persist_partition(part);
+    return 0;
 }
 
 /* === 12. File operations: fs_open/fs_read/fs_close === */
@@ -652,7 +846,7 @@ static int collect_root_filenames(char ***out_names) {
              phys_block = ind[k-6];
         }
         if (phys_block <= 0 || phys_block >= (int)part->s.num_blocks) continue;
-        char *block_ptr = part->data_blocks[phys_block].d;
+        char *block_ptr = (char*)part->data_blocks[phys_block].d;
         int offset = 0;
         while (offset < BLOCK_SIZE) {
             struct dentry *d = (struct dentry *)(block_ptr + offset);
@@ -660,6 +854,8 @@ static int collect_root_filenames(char ***out_names) {
             if (d->inode != 0) {
                 struct inode *fi = &part->inode_table[d->inode];
                 if (fi->mode & INODE_MODE_REG_FILE) {
+                    /* ensure name null-terminated */
+                    if (d->name_len < sizeof(d->name)) d->name[d->name_len] = '\0';
                     names[count] = strdup((char*)d->name);
                     if (!names[count]) {
                         for (int j = 0; j < count; ++j) free(names[j]);
@@ -734,7 +930,6 @@ static void child_work(void) {
         fs_close(fd);
         printf("[child] Finished reading %s, total bytes read: %u\n\n", name, total_read);
     }
-
     for (int i = 0; i < n; ++i) free(names[i]);
     free(names);
     free(idx);
@@ -751,6 +946,20 @@ int main() {
 
     if (mount_root(part, inode_mapping, block_mapping, &root_inode) != 0) {
         fprintf(stderr, "mount_root failed (see messages)\n");
+    }
+    
+    printf("\n--- Demonstrate creating directory and file ---\n");
+
+    if (fs_mkdir("/newdir2") == 0) {
+        printf("Created directory /newdir\n");
+    } else {
+        printf("Failed to create /newdir (might already exist)\n");
+    }
+
+   if (fs_touch("/newdir/hello2.txt", "32239236 Otcheskii Leonid PNU\n") == 0) {
+        printf("Created file /newdir/hello.txt with initial content\n");
+    } else {
+        printf("Failed to create /newdir/hello.txt\n");
     }
 
     printf("\n--- Listing Root Directory ---\n");
