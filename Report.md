@@ -148,6 +148,8 @@ Notes:
 - `collect_root_filenames(char ***out_names)`
   - Gathers regular filenames from the root directory for use by the child worker.
 
+
+```mermaid
 graph TD
     %% --- Subgraph: Public API ---
     subgraph API [User API & System Calls]
@@ -245,6 +247,7 @@ graph TD
     %% Low Level
     alloc_block --> find_free_bit
     alloc_inode --> find_free_bit
+```
 ---
 
 ## Simulation of User Activity
@@ -266,6 +269,7 @@ graph TD
 7. Fork a child: the child runs `child_work` to open and read files randomly. Parent waits, then continues cleanup.
 8. Free directory caches and partition memory and exit.
 
+```mermaid
 sequenceDiagram
     participant P as Parent Process (Writer)
     participant FS as SFSI API
@@ -292,7 +296,7 @@ sequenceDiagram
     
     P->>P: wait()
     Note over P: Test Complete
-
+```
 ---
 
 ## Notes, Limitations & Implementation Details
