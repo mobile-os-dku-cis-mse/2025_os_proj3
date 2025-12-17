@@ -311,8 +311,8 @@ sequenceDiagram
 ---
 
 ## How to Use / Build
-- Ensure `disk.img` exists and matches the expected partition layout defined in `fs.h` (Or you can create one with DiskCreationTool).
 - Compile with your usual C toolchain (the program includes `"fs.h"`; ensure header and any compilation flags provide `BLOCK_SIZE`, inode definitions and partition struct).
+- Ensure `disk.img` exists in same directory as compiled programm and matches the expected partition layout defined in `fs.h` (Or you can create one with DiskCreationTool).
 - Run the binary; it will mount `disk.img`, perform demo creates/writes/list/cat, and spawn a child to read files.
 
 ---
