@@ -13,7 +13,7 @@ with random content. The disk image is saved as "disk.img".
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include "fs.h"
+#include "../fs.h"
 #define DISK_FILE "disk.img"
 #define NUM_RANDOM_FILES 10
 
