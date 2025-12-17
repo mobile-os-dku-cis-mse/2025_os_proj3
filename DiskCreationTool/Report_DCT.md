@@ -1,4 +1,4 @@
-# Disk Image Generation Report
+# DiskCreationTool
 
 ## 1. Overview
 The **DiskCreationTool** is a C utility designed to generate a raw disk image file (`disk.img`) formatted with a custom, lightweight file system. The tool initializes the partition structure in memory, populates the file system metadata (Superblock, Inodes), creates a root directory, and populates it with randomly generated files before flushing the entire structure to a binary file.
