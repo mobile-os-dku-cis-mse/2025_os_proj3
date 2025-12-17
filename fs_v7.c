@@ -22,7 +22,7 @@ int root_inode; // index of root inode
 #define MAX_OPEN_FILES 16 // max open files per process
 #define MAX_DIR_ENTRIES 1024 // max entries in root dir
 #define READ_CHUNK 1024 // read chunk size for fs_read
-#define DISK_IMAGE_PATH "./disk.img" // path to disk image
+#define DISK_IMAGE_PATH "../disk.img" // path to disk image
 
 // dircache constants 
 #define MAX_INODES_CACHE 224
@@ -221,7 +221,86 @@ static void dircache_free_all(void) {
 }
 
 // forward declare inode_data used in cache build 
-static int inode_data(struct partition *p, int inum, void *buf, unsigned int size, unsigned int offset, int write);
+//static int inode_data(struct partition *p, int inum, void *buf, unsigned int size, unsigned int offset, int write);
+
+// get physical block index for a logical block in an inode, allocate if needed
+static int get_block_index(struct partition *p, unsigned char *block_mapping, struct inode *node, int logical_blk, int alloc) {
+    if (!node) return -1;
+
+    if ((unsigned int)(logical_blk * BLOCK_SIZE) < node->size) {
+        if (logical_blk < 6) return node->blocks[logical_blk];
+        if (node->indirect_block >= 0) {
+            unsigned short *ind = (unsigned short*)p->data_blocks[node->indirect_block].d;
+            return ind[logical_blk - 6];
+        }
+    }
+    if (logical_blk < 6) {
+        if (node->blocks[logical_blk] == 0 && !alloc) return -1;
+        if (alloc && ((unsigned int)(logical_blk * BLOCK_SIZE) >= node->size)) {
+             int b = alloc_block(p, block_mapping);
+             if (b < 0) return -1;
+             node->blocks[logical_blk] = b;
+        }
+        return node->blocks[logical_blk];
+    }
+
+    if (node->indirect_block < 0) {
+        if (!alloc) return -1;
+        int b = alloc_block(p, block_mapping);
+        if (b < 0) return -1;
+        node->indirect_block = b;
+    }
+    unsigned short *ind = (unsigned short*)p->data_blocks[node->indirect_block].d;
+    int ind_idx = logical_blk - 6;
+    if (ind_idx < 0 || ind_idx >= BLOCK_SIZE / (int)sizeof(unsigned short)) return -1;
+
+    if (alloc && ind[ind_idx] == 0) {
+        int b = alloc_block(p, block_mapping);
+        if (b < 0) return -1;
+        ind[ind_idx] = b;
+    }
+    return ind[ind_idx];
+}
+
+/////////////// Crucial function: inode data read //////////////////////
+// read or write data from an inode (write supported)
+static int inode_data(struct partition *p, int inum, void *buf, unsigned int size, unsigned int offset, int write) {
+    struct inode *node = load_inode(p, inum);
+    if(!node) return -1;
+
+    if(!write && offset >= node->size) return 0;
+    if(!write && offset + size > node->size) size = node->size - offset;
+
+    unsigned int bytes_processed = 0;
+    unsigned char *ptr = (unsigned char*)buf;
+
+    while(bytes_processed < size) {
+        unsigned int current_offset = (offset + bytes_processed);
+        int block = get_block_index(p, block_mapping, node, current_offset / BLOCK_SIZE, write);
+        if (block < 0) break;
+
+        if (block >= (int)p->s.num_blocks) break;
+
+        unsigned int offset_in_block = current_offset % BLOCK_SIZE;
+        unsigned int bytes_to_copy = BLOCK_SIZE - offset_in_block;
+        if(bytes_to_copy > size - bytes_processed) bytes_to_copy = size - bytes_processed;
+
+        if(write) {
+            memcpy(p->data_blocks[block].d + offset_in_block, ptr + bytes_processed, bytes_to_copy);
+        } else {
+            memcpy(ptr + bytes_processed, p->data_blocks[block].d + offset_in_block, bytes_to_copy);
+        }
+
+        bytes_processed += bytes_to_copy;
+
+        if(write && (offset + bytes_processed) > node->size) {
+            node->size = offset + bytes_processed;
+        }
+    }
+
+    return bytes_processed;
+}
+
 
 //! to call for created dirs
 static int dircache_build_for_dir(struct partition *p, int dir_inum) {
@@ -273,85 +352,7 @@ static void dircache_invalidate_dir(int dir_inum) {
 
 //////////////////////////Inode block management //////////////////////
 
-// get physical block index for a logical block in an inode, allocate if needed
-static int get_block_index(struct partition *p, unsigned char *block_mapping, struct inode *node, int logical_blk, int alloc) {
-    if (!node) return -1;
 
-    if ((unsigned int)(logical_blk * BLOCK_SIZE) < node->size) {
-        if (logical_blk < 6) return node->blocks[logical_blk];
-        if (node->indirect_block >= 0) {
-            unsigned short *ind = (unsigned short*)p->data_blocks[node->indirect_block].d;
-            return ind[logical_blk - 6];
-        }
-    }
-    if (logical_blk < 6) {
-        if (node->blocks[logical_blk] == 0 && !alloc) return -1;
-        if (alloc && ((unsigned int)(logical_blk * BLOCK_SIZE) >= node->size)) {
-             int b = alloc_block(p, block_mapping);
-             if (b < 0) return -1;
-             node->blocks[logical_blk] = b;
-        }
-        return node->blocks[logical_blk];
-    }
-
-    if (node->indirect_block < 0) {
-        if (!alloc) return -1;
-        int b = alloc_block(p, block_mapping);
-        if (b < 0) return -1;
-        node->indirect_block = b;
-    }
-    unsigned short *ind = (unsigned short*)p->data_blocks[node->indirect_block].d;
-    int ind_idx = logical_blk - 6;
-    if (ind_idx < 0 || ind_idx >= BLOCK_SIZE / (int)sizeof(unsigned short)) return -1;
-
-    if (alloc && ind[ind_idx] == 0) {
-        int b = alloc_block(p, block_mapping);
-        if (b < 0) return -1;
-        ind[ind_idx] = b;
-    }
-    return ind[ind_idx];
-}
-
-
-/////////////// Crucial function: inode data read //////////////////////
-
-// read or write data from an inode (write supported)
-static int inode_data(struct partition *p, int inum, void *buf, unsigned int size, unsigned int offset, int write) {
-    struct inode *node = load_inode(p, inum);
-    if(!node) return -1;
-
-    if(!write && offset >= node->size) return 0;
-    if(!write && offset + size > node->size) size = node->size - offset;
-
-    unsigned int bytes_processed = 0;
-    unsigned char *ptr = (unsigned char*)buf;
-
-    while(bytes_processed < size) {
-        unsigned int current_offset = (offset + bytes_processed);
-        int block = get_block_index(p, block_mapping, node, current_offset / BLOCK_SIZE, write);
-        if (block < 0) break;
-
-        if (block >= (int)p->s.num_blocks) break;
-
-        unsigned int offset_in_block = current_offset % BLOCK_SIZE;
-        unsigned int bytes_to_copy = BLOCK_SIZE - offset_in_block;
-        if(bytes_to_copy > size - bytes_processed) bytes_to_copy = size - bytes_processed;
-
-        if(write) {
-            memcpy(p->data_blocks[block].d + offset_in_block, ptr + bytes_processed, bytes_to_copy);
-        } else {
-            memcpy(ptr + bytes_processed, p->data_blocks[block].d + offset_in_block, bytes_to_copy);
-        }
-
-        bytes_processed += bytes_to_copy;
-
-        if(write && (offset + bytes_processed) > node->size) {
-            node->size = offset + bytes_processed;
-        }
-    }
-
-    return bytes_processed;
-}
 
 /////////// Directory searching with cache support (EI 5) //////////////////////
 
