@@ -22,7 +22,7 @@ int root_inode; // index of root inode
 #define MAX_OPEN_FILES 16 // max open files per process
 #define MAX_DIR_ENTRIES 1024 // max entries in root dir
 #define READ_CHUNK 1024 // read chunk size for fs_read
-#define DISK_IMAGE_PATH "../disk.img" // path to disk image
+#define DISK_IMAGE_PATH "./disk.img" // path to disk image
 
 // dircache constants 
 #define MAX_INODES_CACHE 224
