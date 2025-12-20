@@ -16,6 +16,8 @@ gcc -o (name_you_want) fs.c
 ./(name_you_want) /(name_of_the_file_you_want_to_read)
 
 Final code example:
+
+
 <img width="724" height="804" alt="image" src="https://github.com/user-attachments/assets/8a678a85-88bb-44aa-aa2f-32dd7417cc90" />
 
 ...
