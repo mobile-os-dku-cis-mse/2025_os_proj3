@@ -21,6 +21,7 @@ struct file {
 
 static struct file file_table[MAX_OPEN_FILES];
 
+//Bitmap helpers
 static void set_bit(unsigned char *bm, int n) {
     bm[n / 8] |= (1 << (n % 8));
 }
@@ -28,7 +29,7 @@ static void set_bit(unsigned char *bm, int n) {
 static int test_bit(unsigned char *bm, int n) {
     return (bm[n / 8] & (1 << (n % 8))) != 0;
 }
-
+// Find the first free bit in a bitmap 
 static int find_free(unsigned char *bm, int max) {
     for (int i = 1; i < max; i++)
         if (!test_bit(bm, i))
@@ -37,7 +38,10 @@ static int find_free(unsigned char *bm, int max) {
 }
 
 // mount 
-
+/*
+ * Loads the disk image into memory, validates the filesystem,
+ * rebuilds inode and block bitmaps, and initializes runtime structures.
+ */
 static int fs_mount(void) {
     FILE *f = fopen(DISK_IMAGE, "rb");
     if (!f) {
@@ -56,7 +60,8 @@ static int fs_mount(void) {
     memset(block_map, 0, sizeof(block_map));
     set_bit(inode_map, 0);
     set_bit(block_map, 0);
-
+    
+    // Rebuild allocation maps by scanning all inodes 
     for (int i = 1; i < 224; i++) {
         struct inode *n = &part.inode_table[i];
         if (n->mode == 0) continue;
@@ -86,6 +91,7 @@ static int fs_mount(void) {
     return 0;
 }
 
+// Write in-memory filesystem back to disk 
 static void fs_sync(void) {
     FILE *f = fopen(DISK_IMAGE, "r+b");
     if (!f) return;
@@ -94,7 +100,10 @@ static void fs_sync(void) {
 }
 
 // root 
-
+/*
+ * Locate the root directory by finding a directory
+ * whose ".." entry points to itself.
+ */
 static int find_root(void) {
     for (int i = 1; i < 224; i++) {
         struct inode *n = &part.inode_table[i];
@@ -115,6 +124,10 @@ static int find_root(void) {
 }
 
 // blocks 
+/*
+ * Translate a logical block number to a physical block number.
+ * Allocates blocks if requested and necessary.
+ */
 
 static int get_block(struct inode *n, int logical, int alloc) {
     if (logical < 6) {
@@ -152,7 +165,10 @@ static int get_block(struct inode *n, int logical, int alloc) {
 }
 
 // inode rw 
-
+/*
+ * Unified read/write function for inodes.
+ * Handles block translation, offsets, and size updates.
+ */
 static int inode_rw(int inum, void *buf, int size, int off, int write) {
     struct inode *n = &part.inode_table[inum];
     unsigned char *p = buf;
@@ -180,7 +196,8 @@ static int inode_rw(int inum, void *buf, int size, int off, int write) {
     return done;
 }
 
-//dir 
+//directory
+// Lookup a filename inside a directory inode 
 
 static int dir_lookup(int dir, const char *name) {
     struct inode *d = &part.inode_table[dir];
@@ -197,6 +214,7 @@ static int dir_lookup(int dir, const char *name) {
     return -1;
 }
 
+// Resolve a full path to an inode number 
 static int resolve(const char *path) {
     char tmp[256];
     strcpy(tmp, path);
@@ -213,7 +231,7 @@ static int resolve(const char *path) {
 }
 
 //open/read 
-
+//Open a file and create an entry in the open file table
 int fs_open(const char *path) {
     int inum = resolve(path);
     if (inum < 0) return -1;
@@ -228,7 +246,7 @@ int fs_open(const char *path) {
     }
     return -1;
 }
-
+//Read from an open file descriptor
 int fs_read(int fd, void *buf, int size) {
     if (fd < 0 || fd >= MAX_OPEN_FILES || !file_table[fd].used)
         return -1;
@@ -247,7 +265,7 @@ int fs_read(int fd, void *buf, int size) {
     f->offset += r;
     return r;
 }
-
+//Close file
 void fs_close(int fd) {
     if (fd >= 0 && fd < MAX_OPEN_FILES)
         file_table[fd].used = 0;
@@ -285,16 +303,17 @@ void fs_cat(const char *path) {
     }
 }
 
+//Check whether an inode represents a regular file
 static int is_regular_file(int inum) {
     return !(part.inode_table[inum].mode & INODE_MODE_DIR_FILE);
 }
-
+//Uppercase text conversion is user is wrong
 static void modify_text(char *buf, int n) {
     for (int i = 0; i < n; i++)
         if (buf[i] >= 'a' && buf[i] <= 'z')
             buf[i] -= 32;
 }
-
+//Randomly select files and display modified content
 static void show_random_files(void) {
     struct inode *root = &part.inode_table[root_inode];
     struct dentry e;
