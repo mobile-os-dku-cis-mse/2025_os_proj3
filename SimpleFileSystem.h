@@ -62,6 +62,9 @@ private:
     int find_free_fd();
     char get_file_type_char(uint32_t mode) const;
     std::string get_permission_string(uint32_t mode) const;
+public:
+    void dump_inode(uint32_t inode_num) const;
+    void dump_block(uint32_t block_num, uint32_t bytes = 64) const;
 };
 
 #endif

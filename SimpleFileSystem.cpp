@@ -411,3 +411,238 @@ int SimpleFileSystem::find_free_fd() {
     }
     return -1;
 }
+
+int SimpleFileSystem::open(const std::string &pathname, int mode) {
+    if (!mounted_) {
+        std::cerr << "[ERROR] File system not mounted.\n";
+        return -1;
+    }
+
+    int inode_num = path_to_inode(pathname);
+    if (inode_num < 0) {
+        std::cerr << "[OPEN] File not found: " << pathname << "\n";
+        return -1;
+    }
+
+    struct inode *file_inode = &inode_table_[inode_num];
+
+    if (!(file_inode->mode & INODE_MODE_REG_FILE)) {
+        std::cerr << "[OPEN] Not a regular file: " << pathname << "\n";
+        return -1;
+    }
+
+    if ((mode & O_WR) && file_inode->locked) {
+        std::cerr << "[OPEN] File is locked for writing: " << pathname << "\n";
+        return -1;
+    }
+
+    int fd = find_free_fd();
+    if (fd < 0) {
+        std::cerr << "[OPEN] Too many open files (max=" << MAX_OPEN_FILES << ")\n";
+        return -1;
+    }
+
+    file_table_[fd].inode_ptr = file_inode;
+    file_table_[fd].inode_num = static_cast<uint32_t>(inode_num);
+    file_table_[fd].offset = 0;
+    file_table_[fd].mode = mode;
+    file_table_[fd].in_use = true;
+
+    if (mode & O_WR) {
+        file_inode->locked = 1;
+    }
+
+    std::cout << "[OPEN] Success: fd=" << fd
+            << ", path=\"" << pathname << "\""
+            << ", inode=" << inode_num
+            << ", size=" << file_inode->size << " bytes"
+            << ", mode=" << (mode == O_RD ? "O_RD" : mode == O_WR ? "O_WR" : "O_RDWR")
+            << "\n";
+
+    return fd;
+}
+
+int SimpleFileSystem::read(int fd, char *buffer, uint32_t size) {
+    if (!mounted_) {
+        std::cerr << "[ERROR] File system not mounted.\n";
+        return -1;
+    }
+
+    if (fd < 0 || fd >= MAX_OPEN_FILES) {
+        std::cerr << "[READ] Invalid file descriptor: " << fd << "\n";
+        return -1;
+    }
+
+    if (!file_table_[fd].in_use) {
+        std::cerr << "[READ] File descriptor not in use: " << fd << "\n";
+        return -1;
+    }
+
+    if (!(file_table_[fd].mode & O_RD)) {
+        std::cerr << "[READ] File not opened for reading: fd=" << fd << "\n";
+        return -1;
+    }
+
+    FileHandle &file = file_table_[fd];
+    struct inode *inode = file.inode_ptr;
+
+    uint32_t file_size = inode->size;
+    uint32_t current_offset = file.offset;
+
+    if (current_offset >= file_size) {
+        return 0;
+    }
+
+    uint32_t remaining = file_size - current_offset;
+    uint32_t to_read = (size < remaining) ? size : remaining;
+
+    uint32_t bytes_read = 0;
+
+    while (bytes_read < to_read) {
+        uint32_t logical_block = current_offset / BLOCK_SIZE;
+        uint32_t block_offset = current_offset % BLOCK_SIZE;
+
+        int physical_block = get_physical_block(inode, logical_block);
+        if (physical_block < 0) {
+            std::cerr << "[READ] Block mapping error at logical block "
+                    << logical_block << "\n";
+            break;
+        }
+
+        uint32_t bytes_remaining_in_block = BLOCK_SIZE - block_offset;
+        uint32_t bytes_still_needed = to_read - bytes_read;
+        uint32_t bytes_to_copy = (bytes_still_needed < bytes_remaining_in_block)
+                                     ? bytes_still_needed
+                                     : bytes_remaining_in_block;
+
+        std::memcpy(buffer + bytes_read,
+                    data_blocks_[physical_block].d + block_offset,
+                    bytes_to_copy);
+
+        bytes_read += bytes_to_copy;
+        current_offset += bytes_to_copy;
+    }
+
+    file.offset = current_offset;
+
+    std::cout << "[READ] fd=" << fd
+            << ", requested=" << size << " bytes"
+            << ", read=" << bytes_read << " bytes"
+            << ", new_offset=" << file.offset
+            << "\n";
+
+    return static_cast<int>(bytes_read);
+}
+
+int SimpleFileSystem::close(int fd) {
+    if (!mounted_) {
+        std::cerr << "[ERROR] File system not mounted.\n";
+        return -1;
+    }
+
+    if (fd < 0 || fd >= MAX_OPEN_FILES) {
+        std::cerr << "[CLOSE] Invalid file descriptor: " << fd << "\n";
+        return -1;
+    }
+
+    if (!file_table_[fd].in_use) {
+        std::cerr << "[CLOSE] File descriptor not in use: " << fd << "\n";
+        return -1;
+    }
+
+    if (file_table_[fd].mode & O_WR) {
+        if (file_table_[fd].inode_ptr) {
+            file_table_[fd].inode_ptr->locked = 0;
+        }
+    }
+
+    uint32_t inode_num = file_table_[fd].inode_num;
+    uint32_t final_offset = file_table_[fd].offset;
+
+    file_table_[fd].inode_ptr = nullptr;
+    file_table_[fd].inode_num = 0;
+    file_table_[fd].offset = 0;
+    file_table_[fd].mode = 0;
+    file_table_[fd].in_use = false;
+
+    std::cout << "[CLOSE] fd=" << fd
+            << ", inode=" << inode_num
+            << ", final_offset=" << final_offset
+            << "\n";
+
+    return 0;
+}
+
+void SimpleFileSystem::dump_inode(uint32_t inode_num) const {
+    if (!mounted_) {
+        std::cerr << "[ERROR] File system not mounted.\n";
+        return;
+    }
+
+    if (inode_num >= superblock_->num_inodes) {
+        std::cerr << "[ERROR] Invalid inode number: " << inode_num << "\n";
+        return;
+    }
+
+    const struct inode *i = &inode_table_[inode_num];
+
+    std::cout << "\n=== Inode #" << inode_num << " Dump ===\n";
+    std::cout << "  mode          : 0x" << std::hex << std::setfill('0')
+            << std::setw(8) << i->mode << std::dec << std::setfill(' ') << "\n";
+    std::cout << "  locked        : " << i->locked << "\n";
+    std::cout << "  date          : " << i->date << "\n";
+    std::cout << "  size          : " << i->size << " bytes\n";
+    std::cout << "  indirect_block: " << i->indirect_block << "\n";
+    std::cout << "  blocks        : [";
+    for (int j = 0; j < 6; ++j) {
+        std::cout << i->blocks[j];
+        if (j < 5) std::cout << ", ";
+    }
+    std::cout << "]\n";
+
+    std::cout << "  type          : ";
+    if (i->mode & INODE_MODE_DIR_FILE) std::cout << "Directory";
+    else if (i->mode & INODE_MODE_REG_FILE) std::cout << "Regular File";
+    else if (i->mode & INODE_MODE_DEV_FILE) std::cout << "Device File";
+    else std::cout << "Unknown";
+    std::cout << "\n";
+
+    std::cout << "  permissions   : " << get_permission_string(i->mode) << "\n";
+}
+
+void SimpleFileSystem::dump_block(uint32_t block_num, uint32_t bytes) const {
+    if (!mounted_) {
+        std::cerr << "[ERROR] File system not mounted.\n";
+        return;
+    }
+
+    if (block_num >= 4088) {
+        std::cerr << "[ERROR] Invalid block number: " << block_num << "\n";
+        return;
+    }
+
+    std::cout << "\n=== Data Block #" << block_num << " Dump (" << bytes << " bytes) ===\n";
+
+    const uint8_t *data = data_blocks_[block_num].d;
+
+    for (uint32_t i = 0; i < bytes && i < BLOCK_SIZE; ++i) {
+        if (i % 16 == 0) {
+            std::cout << std::hex << std::setfill('0') << std::setw(4) << i << ": "
+                    << std::dec;
+        }
+
+        std::cout << std::hex << std::setfill('0') << std::setw(2)
+                << static_cast<int>(data[i]) << std::dec << " ";
+
+        if ((i + 1) % 16 == 0) {
+            std::cout << " |";
+            for (uint32_t j = i - 15; j <= i; ++j) {
+                char c = data[j];
+                std::cout << (isprint(c) ? c : '.');
+            }
+            std::cout << "|\n";
+        }
+    }
+
+    std::cout << std::dec << std::setfill(' ');
+}
